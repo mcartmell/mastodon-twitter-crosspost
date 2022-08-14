@@ -40,14 +40,13 @@ The program will output a link to authorize API access to your Twitter account. 
 
 - Crossposts from Mastodon to Twitter
 - Supports crossposting own threads
-- No dependencies outside Go standard library
+- Supports images
 
 ## TODO
 
 This is a work in progress with many missing features:
 
-- Support for images and videos
-- Support for private toots
+- Support for videos
 - Support for content warnings
 
 ## Deployment
