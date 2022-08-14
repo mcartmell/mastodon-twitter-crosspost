@@ -10,9 +10,9 @@ A lightweight program to crosspost from Mastodon to Twitter, suitable for self-h
 
 - A [Mastodon](https://mastodon.social/) account
 - A [Twitter](https://twitter.com/) account
-- A [Twitter developer account](https://developer.twitter.com/) with OAuth 2.0 credentials
+- A [Twitter developer account](https://developer.twitter.com/) with OAuth 1.0 and 2.0 credentials
 
-Note that Twitter API v1.1 and OAuth 1.0 are not supported.
+Twitter API v1.1 is required for posting media, and v2.0 is required for posting tweets.
 
 ### Installing
 
@@ -28,6 +28,11 @@ MASTODON_ACCOUNT_ID=123456789
 TWITTER_OAUTH2_REDIRECT_URI=http://localhost:8888
 TWITTER_OAUTH2_CLIENT_ID=123456789
 TWITTER_OAUTH2_CLIENT_SECRET=123456789
+TWITTER_CONSUMER_KEY="123456789"
+TWITTER_CONSUMER_SECRET="123456789"
+TWITTER_ACCESS_TOKEN="123456789"
+TWITTER_ACCESS_TOKEN_SECRET="123456789"
+LISTEN_PORT=8888
 ```
 
 Run the program:
