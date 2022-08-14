@@ -7,14 +7,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"io/ioutil"
 	"log"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dghubble/oauth1"
 )
 
 // NewMastodonCrossPost creates a new MastodonCrossPost.
@@ -32,7 +38,10 @@ import (
 //         "https://api.twitter.com/1.1/statuses/update.json",
 //     )
 //     mastodonCrossPost.CrossPostTweets()
-func NewMastodonCrossPost(mastodonURL, accountID, redirectURI, clientID, clientSecret, twitterAuthorizeUrl, twitterOAuth2TokenUrl, twitterPostTweetUrl string) *MastodonCrossPost {
+func NewMastodonCrossPost(mastodonURL, accountID, redirectURI, clientID, clientSecret, consumerKey, consumerSecret, accessToken, accessTokenSecret, twitterAuthorizeUrl, twitterOAuth2TokenUrl, twitterPostTweetUrl, twitterMediaUploadUrl string) *MastodonCrossPost {
+	oauthConfig := oauth1.NewConfig(consumerKey, consumerSecret)
+	oauthToken := oauth1.NewToken(accessToken, accessTokenSecret)
+	httpClient := oauthConfig.Client(oauth1.NoContext, oauthToken)
 	return &MastodonCrossPost{
 		accountID:             accountID,
 		baseURL:               mastodonURL,
@@ -48,15 +57,23 @@ func NewMastodonCrossPost(mastodonURL, accountID, redirectURI, clientID, clientS
 		twitterPostTweetUrl:   twitterPostTweetUrl,
 		twitterToken:          &TwitterOAuthTokenResponse{},
 		twitterTokenExpiry:    time.Time{},
+		twitterMediaUploadUrl: twitterMediaUploadUrl,
+		oauthClient:           httpClient,
 	}
 }
 
 type PostTweetReplyRequest struct {
 	InReplyToTweetID string `json:"in_reply_to_tweet_id,omitempty"`
 }
+
+type TweetMediaRequest struct {
+	MediaIDs []string `json:"media_ids,omitempty"`
+}
+
 type PostTweetRequest struct {
 	Text  string                 `json:"text"`
 	Reply *PostTweetReplyRequest `json:"reply,omitempty"`
+	Media *TweetMediaRequest     `json:"media,omitempty"`
 }
 
 type PostTweetData struct {
@@ -68,12 +85,20 @@ type PostTweetResponse struct {
 	Data PostTweetData
 }
 
+type MediaAttachment struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
 type Toot struct {
-	ID                 string    `json:"id"`
-	InReplyToID        string    `json:"in_reply_to_id"`
-	InReplyToAccountID string    `json:"in_reply_to_account_id"`
-	Content            string    `json:"content"`
-	CreatedAt          time.Time `json:"created_at"`
+	ID                 string            `json:"id"`
+	InReplyToID        string            `json:"in_reply_to_id"`
+	InReplyToAccountID string            `json:"in_reply_to_account_id"`
+	Content            string            `json:"content"`
+	CreatedAt          time.Time         `json:"created_at"`
+	Reblog             interface{}       `json:"reblog"`
+	MediaAttachments   []MediaAttachment `json:"media_attachments"`
 }
 
 type TwitterOAuthTokenRequest struct {
@@ -82,6 +107,14 @@ type TwitterOAuthTokenRequest struct {
 	RedirectUri  string `json:"redirect_uri"`
 	CodeVerifier string `json:"code_verifier"`
 	RefreshToken string `json:"refresh_token"`
+}
+
+type PostMediaRequest struct {
+	MediaData string `json:"media_data"`
+}
+
+type PostMediaResponse struct {
+	MediaIDString string `json:"media_id_string"`
 }
 
 type tootMapEntry struct {
@@ -103,6 +136,8 @@ type MastodonCrossPost struct {
 	twitterPostTweetUrl   string
 	twitterToken          *TwitterOAuthTokenResponse
 	twitterTokenExpiry    time.Time
+	twitterMediaUploadUrl string
+	oauthClient           *http.Client
 }
 
 type TwitterOAuthTokenResponse struct {
@@ -149,6 +184,7 @@ func (m *MastodonCrossPost) refreshTwitterToken() {
 		}
 	}
 }
+
 func (m *MastodonCrossPost) pruneTootCache() {
 	m.lock.Lock()
 	defer m.lock.Unlock()
@@ -187,20 +223,29 @@ func (m *MastodonCrossPost) CrossPostTweets() {
 		})
 
 		for _, toot := range toots {
+			// Skip if Toot is a reply to another Toot
 			if toot.InReplyToID != "" || toot.InReplyToAccountID != "" {
 				if toot.InReplyToAccountID != m.accountID {
 					continue
 				}
 			}
+			// Skip if Toot was posted before the bot was started
 			if toot.CreatedAt.Before(m.createdAt) {
 				continue
 			}
+
+			// Skip if the Toot is a reblog
+			if toot.Reblog != nil {
+				continue
+			}
+
 			// Check if we have already posted this toot
 			if toot.ID <= m.lastSeenTootID {
 				continue
 			}
+
 			if err := m.postToTwitter(toot); err != nil {
-				log.Fatal(err)
+				log.Fatal("error posting to twitter", err)
 			}
 		}
 	}
@@ -221,11 +266,115 @@ func (m *MastodonCrossPost) convertTootHTMLToText(content string) string {
 	return content
 }
 
+func (m *MastodonCrossPost) uploadMediaToTwitter(tempFile string) (mediaID string, err error) {
+	signingClient := m.oauthClient
+
+	// Post the tempFile to Twitter and retrieve the media id
+	mediaUploadUrl := m.twitterMediaUploadUrl
+
+	// Open the file
+	file, err := os.Open(tempFile)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	fileBytes, err := ioutil.ReadAll(file)
+	if err != nil {
+		return "", err
+	}
+
+	// Post file as form data
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("media", filepath.Base(tempFile))
+	if err != nil {
+		return "", err
+	}
+	_, err = part.Write(fileBytes)
+	if err != nil {
+		return "", err
+	}
+	err = writer.Close()
+	if err != nil {
+		return "", err
+	}
+
+	// Send the request
+	req, err := http.NewRequest("POST", mediaUploadUrl, body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Add("Content-Type", writer.FormDataContentType())
+
+	httpResp, err := signingClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer httpResp.Body.Close()
+
+	// Read the response
+	respBytes, err := ioutil.ReadAll(httpResp.Body)
+	if err != nil {
+		return "", err
+	}
+	var resp PostMediaResponse
+	if err := json.Unmarshal(respBytes, &resp); err != nil {
+		return "", err
+	}
+	return resp.MediaIDString, nil
+}
+
 func (m *MastodonCrossPost) postToTwitter(toot Toot) error {
+	// If there are images in the media attachments, save them to temporary files.
+	// We will delete them after we have posted the tweet.
+	var mediaFiles []string
+	for _, media := range toot.MediaAttachments {
+		if media.Type != "image" {
+			continue
+		}
+		resp, err := http.Get(media.URL)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		file, err := ioutil.TempFile("", "mastodon-cross-post")
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		if _, err := io.Copy(file, resp.Body); err != nil {
+			return err
+		}
+		mediaFiles = append(mediaFiles, file.Name())
+	}
+
+	var mediaIDs []string
+
+	for _, mediaFile := range mediaFiles {
+		mediaID, err := m.uploadMediaToTwitter(mediaFile)
+		if err != nil {
+			return err
+		}
+		// Add the media id
+		mediaIDs = append(mediaIDs, mediaID)
+	}
+
 	content := m.convertTootHTMLToText(toot.Content)
+	if content == "" && len(mediaIDs) == 0 {
+		log.Println("Toot empty, skipping")
+		return nil
+	}
 	log.Println("Posting tweet: ", content)
 	tweetToPost := PostTweetRequest{
 		Text: content,
+	}
+
+	if len(mediaIDs) > 0 {
+		tweetToPost.Media = &TweetMediaRequest{
+			MediaIDs: mediaIDs,
+		}
+	} else {
+		return nil
 	}
 
 	// If toot is a reply, add the original tweet ID to the tweet

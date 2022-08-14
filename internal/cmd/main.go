@@ -13,6 +13,7 @@ const (
 	twitterOAuth2TokenUrl = "https://api.twitter.com/2/oauth2/token"
 	twitterPostTweetUrl   = "https://api.twitter.com/2/tweets"
 	twitterAuthorizeUrl   = "https://twitter.com/i/oauth2/authorize"
+	twitterMediaUploadUrl = "https://upload.twitter.com/1.1/media/upload.json"
 )
 
 // Run runs the crosspost command.
@@ -25,9 +26,14 @@ func Run() {
 		os.Getenv("TWITTER_OAUTH2_REDIRECT_URI"),
 		os.Getenv("TWITTER_OAUTH2_CLIENT_ID"),
 		os.Getenv("TWITTER_OAUTH2_CLIENT_SECRET"),
+		os.Getenv("TWITTER_CONSUMER_KEY"),
+		os.Getenv("TWITTER_CONSUMER_SECRET"),
+		os.Getenv("TWITTER_ACCESS_TOKEN"),
+		os.Getenv("TWITTER_ACCESS_TOKEN_SECRET"),
 		twitterAuthorizeUrl,
 		twitterOAuth2TokenUrl,
 		twitterPostTweetUrl,
+		twitterMediaUploadUrl,
 	)
 	m.CrossPostTweets()
 }
