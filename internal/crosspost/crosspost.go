@@ -176,7 +176,7 @@ func (m *MastodonCrossPost) refreshTwitterToken() {
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
 	for range t.C {
-		if time.Now().After(m.twitterTokenExpiry.Add(-30 * time.Minute)) {
+		if time.Now().After(m.twitterTokenExpiry.Add(-60 * time.Minute)) {
 			log.Println("Refreshing Twitter token")
 			if err := m.getTwitterToken(true); err != nil {
 				log.Println("Error refreshing Twitter token:", err)
@@ -214,7 +214,8 @@ func (m *MastodonCrossPost) CrossPostTweets() {
 		// Get latest tweets
 		toots, err := m.getLatestToots()
 		if err != nil {
-			log.Fatal(err)
+			log.Println("Error getting latest toots:", err, "Retrying in 1 minute")
+			continue
 		}
 
 		// Sort toots by createdAt in reverse
@@ -229,8 +230,8 @@ func (m *MastodonCrossPost) CrossPostTweets() {
 					continue
 				}
 			}
-			// Skip if Toot was posted before the bot was started
-			if toot.CreatedAt.Before(m.createdAt) {
+			// Skip if Toot was posted more than 1 hour before the bot was started
+			if toot.CreatedAt.Before(time.Now().Add(-1 * time.Hour)) {
 				continue
 			}
 
@@ -244,8 +245,15 @@ func (m *MastodonCrossPost) CrossPostTweets() {
 				continue
 			}
 
-			if err := m.postToTwitter(toot); err != nil {
-				log.Fatal("error posting to twitter", err)
+			for i := 1; i < 5; i++ {
+				err := m.postToTwitter(toot)
+				if err == nil {
+					break
+				}
+
+				log.Println("Error posting to Twitter:", err, "Retrying in 20 seconds")
+				time.Sleep(20 * time.Second)
+				i++
 			}
 		}
 	}
@@ -373,8 +381,6 @@ func (m *MastodonCrossPost) postToTwitter(toot Toot) error {
 		tweetToPost.Media = &TweetMediaRequest{
 			MediaIDs: mediaIDs,
 		}
-	} else {
-		return nil
 	}
 
 	// If toot is a reply, add the original tweet ID to the tweet
@@ -457,6 +463,11 @@ func (m *MastodonCrossPost) getTwitterToken(refresh bool) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// Check status code
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("error getting Twitter token: %s", resp.Status)
+	}
+
 	bodyBytes, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -464,13 +475,14 @@ func (m *MastodonCrossPost) getTwitterToken(refresh bool) error {
 	var tokenResponse TwitterOAuthTokenResponse
 	err = json.Unmarshal(bodyBytes, &tokenResponse)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("error getting Twitter token: %s", err)
 	}
 	// Save token
 	m.lock.Lock()
 	m.twitterToken = &tokenResponse
 	m.twitterTokenExpiry = time.Now().Add(time.Duration(m.twitterToken.ExpiresIn) * time.Second)
 	m.lock.Unlock()
+	log.Println("Twitter token expiry is", m.twitterTokenExpiry)
 	return nil
 }
 

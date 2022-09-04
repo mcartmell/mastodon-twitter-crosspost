@@ -1,7 +1,8 @@
 FROM golang:latest as build
 
 WORKDIR /go/src/app
-ADD *.go go.mod /go/src/app/
+
+COPY . /go/src/app/
 
 RUN go get -d -v ./...
 ENV CGO_ENABLED=0
