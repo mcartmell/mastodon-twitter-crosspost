@@ -10,9 +10,9 @@ A lightweight program to crosspost from Mastodon to Twitter, suitable for self-h
 
 - A [Mastodon](https://mastodon.social/) account
 - A [Twitter](https://twitter.com/) account
-- A [Twitter developer account](https://developer.twitter.com/) with OAuth 2.0 credentials
+- A [Twitter developer account](https://developer.twitter.com/) with OAuth 1.0 and 2.0 credentials
 
-Note that Twitter API v1.1 and OAuth 1.0 are not supported.
+Twitter API v1.1 is required for posting media, and v2.0 is required for posting tweets.
 
 ### Installing
 
@@ -28,6 +28,11 @@ MASTODON_ACCOUNT_ID=123456789
 TWITTER_OAUTH2_REDIRECT_URI=http://localhost:8888
 TWITTER_OAUTH2_CLIENT_ID=123456789
 TWITTER_OAUTH2_CLIENT_SECRET=123456789
+TWITTER_CONSUMER_KEY="123456789"
+TWITTER_CONSUMER_SECRET="123456789"
+TWITTER_ACCESS_TOKEN="123456789"
+TWITTER_ACCESS_TOKEN_SECRET="123456789"
+LISTEN_PORT=8888
 ```
 
 Run the program:
@@ -40,14 +45,13 @@ The program will output a link to authorize API access to your Twitter account. 
 
 - Crossposts from Mastodon to Twitter
 - Supports crossposting own threads
-- No dependencies outside Go standard library
+- Supports images
 
 ## TODO
 
 This is a work in progress with many missing features:
 
-- Support for images and videos
-- Support for private toots
+- Support for videos
 - Support for content warnings
 
 ## Deployment
