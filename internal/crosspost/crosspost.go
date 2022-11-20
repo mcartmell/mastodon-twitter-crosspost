@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -12,10 +13,11 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,17 +29,17 @@ import (
 //
 // Example:
 //
-//     mastodonCrossPost := NewMastodonCrossPost(
-//         "https://mastodon.social",
-//         "123456789", // Mastodon account ID
-//         "https://example.com/callback",
-//         "123456789", // Twitter OAuth 2 client ID
-//         "123456789", // Twitter OAuth 2 client secret
-//         "https://api.twitter.com/oauth2/authorize",
-//         "https://api.twitter.com/oauth2/token",
-//         "https://api.twitter.com/1.1/statuses/update.json",
-//     )
-//     mastodonCrossPost.CrossPostTweets()
+//	mastodonCrossPost := NewMastodonCrossPost(
+//	    "https://mastodon.social",
+//	    "123456789", // Mastodon account ID
+//	    "https://example.com/callback",
+//	    "123456789", // Twitter OAuth 2 client ID
+//	    "123456789", // Twitter OAuth 2 client secret
+//	    "https://api.twitter.com/oauth2/authorize",
+//	    "https://api.twitter.com/oauth2/token",
+//	    "https://api.twitter.com/1.1/statuses/update.json",
+//	)
+//	mastodonCrossPost.CrossPostTweets()
 func NewMastodonCrossPost(mastodonURL, accountID, redirectURI, clientID, clientSecret, consumerKey, consumerSecret, accessToken, accessTokenSecret, twitterAuthorizeUrl, twitterOAuth2TokenUrl, twitterPostTweetUrl, twitterMediaUploadUrl string) *MastodonCrossPost {
 	oauthConfig := oauth1.NewConfig(consumerKey, consumerSecret)
 	oauthToken := oauth1.NewToken(accessToken, accessTokenSecret)
@@ -291,55 +293,129 @@ func (m *MastodonCrossPost) uploadMediaToTwitter(tempFile string) (mediaID strin
 		return "", err
 	}
 
-	// Post file as form data
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("media", filepath.Base(tempFile))
+	// Make INIT request to Twitter
+	// work out media type from file contents
+	mediaType := http.DetectContentType(fileBytes)
+	// url encode the media type
+	mediaType = url.QueryEscape(mediaType)
+	log.Printf("Uploading %s to Twitter, media type: %s\n", tempFile, mediaType)
+	req, err := http.NewRequest("POST", mediaUploadUrl+"?command=INIT&total_bytes="+strconv.Itoa(len(fileBytes))+"&media_type="+mediaType, nil)
 	if err != nil {
 		return "", err
 	}
-	_, err = part.Write(fileBytes)
-	if err != nil {
-		return "", err
-	}
-	err = writer.Close()
-	if err != nil {
-		return "", err
-	}
-
-	// Send the request
-	req, err := http.NewRequest("POST", mediaUploadUrl, body)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Add("Content-Type", writer.FormDataContentType())
-
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	log.Printf("Twitter INIT request: %+v\n", req)
 	httpResp, err := signingClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer httpResp.Body.Close()
-
-	// Read the response
+	// non-2xx response
+	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
+		// read the response body
+		body, err := ioutil.ReadAll(httpResp.Body)
+		if err != nil {
+			return "", err
+		}
+		return "", errors.New("Twitter returned non-2xx response for INIT: " + strconv.Itoa(httpResp.StatusCode) + " " + string(body))
+	}
 	respBytes, err := ioutil.ReadAll(httpResp.Body)
 	if err != nil {
 		return "", err
 	}
-	var resp PostMediaResponse
-	if err := json.Unmarshal(respBytes, &resp); err != nil {
+	var respData map[string]interface{}
+	err = json.Unmarshal(respBytes, &respData)
+	if err != nil {
 		return "", err
 	}
-	return resp.MediaIDString, nil
+	mediaID = respData["media_id_string"].(string)
+
+	// Make APPEND requests to Twitter
+	segmentIndex := 0
+	for {
+		// Calculate the segment index
+		segmentIndex = segmentIndex + 1
+		segmentIndexStr := strconv.Itoa(segmentIndex - 1) // first segment is 0
+
+		// Calculate the start and end of the segment
+		segmentStart := (segmentIndex - 1) * 5 * 1024 * 1024
+		segmentEnd := segmentIndex * 5 * 1024 * 1024
+		if segmentEnd > len(fileBytes) {
+			segmentEnd = len(fileBytes)
+		}
+
+		// Create a multipart form body with multiple parameters
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		part, err := writer.CreateFormFile("media", tempFile)
+		if err != nil {
+			return "", err
+		}
+		_, err = part.Write(fileBytes[segmentStart:segmentEnd])
+		if err != nil {
+			return "", err
+		}
+		writer.WriteField("command", "APPEND")
+		writer.WriteField("media_id", mediaID)
+		writer.WriteField("segment_index", segmentIndexStr)
+		err = writer.Close()
+		if err != nil {
+			return "", err
+		}
+
+		// Make the request
+		req, err := http.NewRequest("POST", mediaUploadUrl, body)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Add("Content-Type", writer.FormDataContentType())
+		log.Printf("Making Twitter APPEND request: \n")
+		httpResp, err := signingClient.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer httpResp.Body.Close()
+		// successful response is 2xx
+		if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
+			// read the response body
+			body, err := ioutil.ReadAll(httpResp.Body)
+			if err != nil {
+				return "", err
+			}
+			return "", errors.New("Twitter returned non-2xx response for APPEND: " + strconv.Itoa(httpResp.StatusCode) + " " + string(body))
+		}
+		if segmentEnd == len(fileBytes) {
+			break
+		}
+	}
+
+	// Make FINALIZE request to Twitter
+	req, err = http.NewRequest("POST", mediaUploadUrl+"?command=FINALIZE&media_id="+mediaID, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	httpResp, err = signingClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer httpResp.Body.Close()
+	// successful response is 2xx
+	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
+		return "", errors.New("Twitter returned non-2xx status code for FINALIZE: " + strconv.Itoa(httpResp.StatusCode))
+	}
+
+	return mediaID, nil
 }
 
 func (m *MastodonCrossPost) postToTwitter(toot Toot) error {
+	if !strings.Contains(toot.Content, "health bars and rockets") {
+		return nil
+	}
 	// If there are images in the media attachments, save them to temporary files.
 	// We will delete them after we have posted the tweet.
 	var mediaFiles []string
 	for _, media := range toot.MediaAttachments {
-		if media.Type != "image" {
-			continue
-		}
 		resp, err := http.Get(media.URL)
 		if err != nil {
 			return err
